@@ -1,0 +1,265 @@
+// ==UserScript==
+// @name         GRZY - PURPLE ULTRA V13.0 (Analytics & Motion)
+// @match        https://bloxflip.com/*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // --- GRZY CORE ENGINE ---
+    const GrzyEngine = {
+        async generate(roundId, clientSeed, riskLevel) {
+            const salt = riskLevel === 'aggressive' ? 'grzy_v13_high' : 'grzy_v13_safe';
+            const message = `${roundId}:${salt}`;
+            const encoder = new TextEncoder();
+            const keyData = encoder.encode(clientSeed);
+            const msgData = encoder.encode(message);
+
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+            );
+
+            const signature = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
+            const hexHash = Array.from(new Uint8Array(signature)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+            let tiles = [];
+            let offset = 0;
+            const limit = riskLevel === 'aggressive' ? 7 : 3;
+
+            while (tiles.length < limit && offset < hexHash.length - 2) {
+                const val = (parseInt(hexHash.substring(offset, offset + 2), 16) % 25) + 1;
+                if (!tiles.includes(val)) tiles.push(val);
+                offset += 2;
+            }
+            return tiles;
+        }
+    };
+
+    // 1. SESSION TRACKER STATE
+    let sessionData = {
+        startBalance: null,
+        currentProfit: 0,
+        wins: 0,
+        losses: 0
+    };
+
+    const Icons = {
+        home: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M10,20V14H14V20H19V12H22L12,3L2,12H5V20H10Z"/></svg>`,
+        features: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M7,2V4H8V18A4,4 0 0,0 12,22A4,4 0 0,0 16,18V4H17V2H7M14,18A2,2 0 0,1 12,20A2,2 0 0,1 10,18V4H14V18Z"/></svg>`,
+        settings: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11.03L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.47,5.34 14.86,5.12L14.47,2.47C14.44,2.23 14.24,2.05 14,2.05H10C9.76,2.05 9.56,2.23 9.53,2.47L9.14,5.12C8.53,5.34 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11.03C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,12.97L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.53,18.66 9.14,18.88L9.53,21.53C9.56,21.77 9.76,21.95 10,21.95H14C14.24,21.95 14.44,21.77 14.47,21.53L14.86,18.88C15.47,18.66 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z"/></svg>`
+    };
+
+    // 2. ADVANCED STYLING
+    const style = document.createElement('style');
+    style.textContent = `
+        @import url('https://fonts.googleapis.com/css2?family=Syncopate:wght@700&family=Inter:wght@400;700;900&display=swap');
+
+        @keyframes fadeInScale { from { opacity: 0; transform: translateY(-40%) scale(0.9); } to { opacity: 1; transform: translateY(-50%) scale(1); } }
+        @keyframes slideUp { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        @keyframes pulseGlow { 0% { box-shadow: 0 0 30px rgba(106, 0, 255, 0.4); } 50% { box-shadow: 0 0 60px rgba(106, 0, 255, 0.7); } 100% { box-shadow: 0 0 30px rgba(106, 0, 255, 0.4); } }
+        @keyframes tilePop { 0% { transform: scale(0); opacity: 0; } 80% { transform: scale(1.1); } 100% { transform: scale(1); opacity: 1; } }
+        @keyframes dataBlink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
+        #grzy-main {
+            position: fixed; left: 20px; top: 50%; transform: translateY(-50%);
+            width: 540px; height: 380px; background: rgba(8, 5, 16, 0.95);
+            backdrop-filter: blur(15px); border: 2px solid #6a00ff; border-radius: 24px;
+            z-index: 1000000; display: flex; overflow: hidden;
+            animation: fadeInScale 0.6s cubic-bezier(0.16, 1, 0.3, 1), pulseGlow 4s infinite;
+            font-family: 'Inter', sans-serif; color: #fff;
+        }
+
+        #grzy-nav {
+            width: 80px; background: rgba(5, 3, 10, 0.8); border-right: 1px solid #1a142e;
+            display: flex; flex-direction: column; align-items: center; padding-top: 30px; gap: 20px;
+        }
+        .nav-icon {
+            width: 46px; height: 46px; border-radius: 14px; display: flex;
+            align-items: center; justify-content: center; cursor: pointer;
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); color: #4a3b6e;
+        }
+        .nav-icon.active { color: #fff; background: #6a00ff; box-shadow: 0 0 20px #6a00ff; }
+
+        #grzy-content { flex: 1; padding: 25px; display: flex; flex-direction: column; }
+        .grzy-page { display: none; height: 100%; flex-direction: column; animation: slideUp 0.4s ease-out; }
+        .grzy-page.active { display: flex; }
+
+        #grzy-header { font-family: 'Syncopate', sans-serif; font-size: 26px; margin-bottom: 20px; letter-spacing: 5px; color: #fff; text-shadow: 0 0 15px #6a00ff; }
+
+        /* ANALYTICS GRID */
+        #grzy-stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 15px; }
+        .stat-card { background: rgba(20, 15, 40, 0.6); border: 1px solid #2a1b4d; border-radius: 12px; padding: 10px; text-align: center; }
+        .stat-val { font-size: 14px; font-weight: 900; color: #fff; margin-top: 4px; }
+        .stat-label { font-size: 8px; text-transform: uppercase; color: #6a00ff; letter-spacing: 1px; }
+        .stat-win { color: #00ffaa !important; }
+        .stat-lose { color: #ff3e3e !important; }
+
+        .grzy-row {
+            display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
+            padding: 12px; background: rgba(17, 12, 34, 0.6); border-radius: 12px;
+            border: 1px solid #1f143d;
+        }
+        .grzy-label { font-size: 10px; font-weight: 900; text-transform: uppercase; color: #6a00ff; letter-spacing: 1.5px; }
+
+        .toggle-btn {
+            width: 40px; height: 20px; background: #1a142e; border-radius: 20px;
+            position: relative; cursor: pointer; transition: 0.4s;
+        }
+        .toggle-btn.on { background: #6a00ff; }
+        .toggle-btn::after { content: ''; position: absolute; width: 14px; height: 14px; background: #fff; border-radius: 50%; top: 3px; left: 3px; transition: 0.4s; }
+        .toggle-btn.on::after { left: 23px; }
+
+        #grzy-mini-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; width: 140px; margin: 0 auto; }
+        .m-tile { width: 22px; height: 22px; background: #1a142e; border-radius: 6px; border: 1px solid #2a1b4d; transition: 0.4s; }
+        .m-tile.lit { background: #6a00ff; box-shadow: 0 0 15px #6a00ff; border-color: #fff; animation: tilePop 0.4s forwards; }
+
+        .grzy-glow {
+            border: 3px solid #6a00ff !important;
+            box-shadow: 0 0 30px #6a00ff !important;
+            transform: scale(1.05) !important;
+            background: rgba(106, 0, 255, 0.1) !important;
+        }
+    `;
+    document.head.appendChild(style);
+
+    // 3. DOM CONSTRUCTION
+    const main = document.createElement('div');
+    main.id = 'grzy-main';
+    main.innerHTML = `
+        <div id="grzy-nav">
+            <div class="nav-icon active" data-page="home">${Icons.home}</div>
+            <div class="nav-icon" data-page="features">${Icons.features}</div>
+            <div class="nav-icon" data-page="settings">${Icons.settings}</div>
+        </div>
+        <div id="grzy-content">
+            <div id="grzy-header">GRZY</div>
+
+            <div class="grzy-page active" id="page-home">
+                <div id="grzy-stats-row">
+                    <div class="stat-card">
+                        <div class="stat-label">Profit</div>
+                        <div class="stat-val" id="stat-profit">0.00</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Wins</div>
+                        <div class="stat-val stat-win" id="stat-wins">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Losses</div>
+                        <div class="stat-val stat-lose" id="stat-losses">0</div>
+                    </div>
+                </div>
+                <div class="grzy-row" style="background: transparent; border: none; padding: 0 0 10px 0;">
+                    <div class="grzy-label">Live Algorithm Map</div>
+                </div>
+                <div id="grzy-mini-grid"></div>
+            </div>
+
+            <div class="grzy-page" id="page-features">
+                <div class="grzy-row"><span class="grzy-label">Aggressive Extraction</span><div class="toggle-btn" id="feat-aggressive"></div></div>
+                <div class="grzy-row"><span class="grzy-label">Neural Smoothing</span><div class="toggle-btn on"></div></div>
+                <div class="grzy-row"><span class="grzy-label">Anti-Detection</span><div class="toggle-btn on"></div></div>
+            </div>
+
+            <div class="grzy-page" id="page-settings">
+                <div class="grzy-row"><span class="grzy-label">Grid Glow</span><div class="toggle-btn on" id="set-glow"></div></div>
+                <div class="grzy-row"><span class="grzy-label">Session Reset</span><button id="btn-reset" style="background:#6a00ff; border:none; color:#fff; font-size:9px; padding:5px 10px; border-radius:5px; cursor:pointer;">RESET DATA</button></div>
+                <div style="font-size: 8px; opacity: 0.2; text-align: center; margin-top: auto; letter-spacing: 3px;">GRZY ANALYTICS V13</div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(main);
+
+    const mGrid = document.getElementById('grzy-mini-grid');
+    for(let i=1; i<=25; i++) {
+        const d = document.createElement('div');
+        d.className = 'm-tile';
+        d.id = `mt-${i}`;
+        mGrid.appendChild(d);
+    }
+
+    // 4. ANALYTICS LOGIC (Win/Loss/Profit Detection)
+    function updateAnalytics() {
+        const balanceEl = document.querySelector('nav div[class*="navbar-module-scss-module__balance"] span');
+        if (!balanceEl) return;
+
+        const currentBal = parseFloat(balanceEl.innerText.replace(/,/g, ''));
+        if (sessionData.startBalance === null) {
+            sessionData.startBalance = currentBal;
+            return;
+        }
+
+        if (currentBal > (sessionData.startBalance + sessionData.currentProfit)) {
+            // WIN DETECTED
+            sessionData.wins++;
+            sessionData.currentProfit = currentBal - sessionData.startBalance;
+            triggerStatAnim('stat-wins');
+        } else if (currentBal < (sessionData.startBalance + sessionData.currentProfit)) {
+            // LOSS DETECTED
+            sessionData.losses++;
+            sessionData.currentProfit = currentBal - sessionData.startBalance;
+            triggerStatAnim('stat-losses');
+        }
+
+        document.getElementById('stat-profit').innerText = sessionData.currentProfit.toFixed(2);
+        document.getElementById('stat-wins').innerText = sessionData.wins;
+        document.getElementById('stat-losses').innerText = sessionData.losses;
+    }
+
+    function triggerStatAnim(id) {
+        const el = document.getElementById(id);
+        el.style.animation = 'none';
+        void el.offsetWidth;
+        el.style.animation = 'dataBlink 0.5s';
+    }
+
+    document.getElementById('btn-reset').onclick = () => {
+        sessionData = { startBalance: null, currentProfit: 0, wins: 0, losses: 0 };
+        updateAnalytics();
+    };
+
+    // 5. NAV & TOGGLES
+    document.querySelectorAll('.nav-icon').forEach(icon => {
+        icon.onclick = () => {
+            document.querySelectorAll('.nav-icon').forEach(i => i.classList.remove('active'));
+            document.querySelectorAll('.grzy-page').forEach(p => p.classList.remove('active'));
+            icon.classList.add('active');
+            document.getElementById(`page-${icon.dataset.page}`).classList.add('active');
+        };
+    });
+    document.querySelectorAll('.toggle-btn').forEach(btn => btn.onclick = () => btn.classList.toggle('on'));
+
+    // 6. CONTINUOUS ENGINE
+    let lastRoundId = "";
+    async function grzyEngine() {
+        updateAnalytics();
+        const modalInputs = document.querySelectorAll('.input-module-scss-module__SixybW__input');
+        if (modalInputs.length < 2) return;
+
+        const clientSeed = modalInputs[0].value;
+        const roundId = modalInputs[1].value;
+        const isAggressive = document.getElementById('feat-aggressive').classList.contains('on');
+
+        if (roundId !== lastRoundId) {
+            lastRoundId = roundId;
+            const tiles = await GrzyEngine.generate(roundId, clientSeed, isAggressive ? 'aggressive' : 'safe');
+
+            document.querySelectorAll('.m-tile').forEach(t => t.classList.remove('lit'));
+            document.querySelectorAll('.grzy-glow').forEach(t => t.classList.remove('grzy-glow'));
+
+            tiles.forEach((tileNum, index) => {
+                setTimeout(() => {
+                    const mt = document.getElementById(`mt-${tileNum}`);
+                    if (mt) mt.classList.add('lit');
+                    const siteGrid = document.querySelectorAll('button[class*="mines-module-scss-module__gUfZ2G__minesGameItem"]');
+                    if (siteGrid[tileNum - 1] && document.getElementById('set-glow').classList.contains('on')) {
+                        siteGrid[tileNum - 1].classList.add('grzy-glow');
+                    }
+                }, index * 80);
+            });
+        }
+    }
+
+    setInterval(grzyEngine, 1000);
+})();
