@@ -1,0 +1,264 @@
+// ==UserScript==
+// @name         Grzy - Extraction V5 FULL (Internal Engine)
+// @match        https://bloxflip.com/*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // --- INTERNAL CRYPTO ENGINE ---
+    const CryptoEngine = {
+        async generateTiles(roundId, clientSeed, isUnrig) {
+            const effectiveSeed = isUnrig ? clientSeed + "_UNRIG_ACTIVE" : clientSeed;
+            const modeSalt = isUnrig ? "v5_anti_trig_active" : "v5_standard_mode";
+            const message = `${roundId}:${modeSalt}`;
+
+            const encoder = new TextEncoder();
+            const keyData = encoder.encode(effectiveSeed);
+            const msgData = encoder.encode(message);
+
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+            );
+
+            const signature = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
+            const hashArray = Array.from(new Uint8Array(signature));
+            const hexHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+            let predictedTiles = [];
+            let offset = 0;
+
+            // Extracting 5 unique tile numbers (1-25)
+            while (predictedTiles.length < 5 && offset < hexHash.length - 2) {
+                const segment = hexHash.substring(offset, offset + 2);
+                const tileValue = (parseInt(segment, 16) % 25) + 1;
+                if (!predictedTiles.includes(tileValue)) {
+                    predictedTiles.push(tileValue);
+                }
+                offset += 2;
+            }
+            return predictedTiles;
+        }
+    };
+
+    // 1. THEME & LAYOUT
+    const style = document.createElement('style');
+    style.textContent = `
+        #ex-shell {
+            position: fixed; left: 20px; top: 50%; transform: translateY(-50%);
+            width: 380px; height: 560px; background: #0b0b0f; border: 1px solid #1a1a25;
+            border-radius: 24px; z-index: 2147483647; display: flex; overflow: hidden;
+            box-shadow: 0 0 50px rgba(0,0,0,0.9); font-family: 'Inter', sans-serif;
+            color: #eee; transition: opacity 0.3s;
+        }
+        .ex-rail {
+            width: 65px; background: #08080c; border-right: 1px solid #1a1a25;
+            display: flex; flex-direction: column; align-items: center; padding: 25px 0; gap: 30px;
+            cursor: move;
+        }
+        .rail-icon {
+            width: 38px; height: 38px; border-radius: 12px; display: flex;
+            align-items: center; justify-content: center; cursor: pointer;
+            color: #444; transition: 0.3s; font-size: 18px;
+        }
+        .rail-icon.active { background: #bd00ff; color: #fff; box-shadow: 0 0 15px #bd00ff; }
+        .rail-icon:hover:not(.active) { color: #bd00ff; background: #15151e; }
+
+        .ex-content { flex: 1; padding: 25px; display: flex; flex-direction: column; position: relative; }
+        .page { display: none; height: 100%; flex-direction: column; }
+        .page.active { display: flex; }
+
+        .header-tag { color: #bd00ff; font-size: 10px; font-weight: 900; letter-spacing: 2.5px; text-transform: uppercase; margin-bottom: 15px; }
+
+        .ex-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 25px; }
+        .tile {
+            aspect-ratio: 1; background: #14141c; border: 1px solid #1f1f2a;
+            border-radius: 10px; color: #333; font-size: 10px; font-weight: 800;
+            display: flex; align-items: center; justify-content: center; transition: 0.2s;
+        }
+        .tile.highlight { background: #bd00ff !important; color: #fff !important; box-shadow: 0 0 20px #bd00ff; border-color: #ff00ff; }
+
+        .input-box { margin-bottom: 15px; }
+        .label { font-size: 8px; color: #bd00ff; font-weight: 900; margin-bottom: 6px; text-transform: uppercase; opacity: 0.8; }
+        .ex-field {
+            width: 100%; background: #000; border: 1px solid #1f1f2a; border-radius: 12px;
+            padding: 12px; color: #fff; font-size: 11px; outline: none; transition: 0.3s; box-sizing: border-box;
+        }
+        .ex-field:focus { border-color: #bd00ff; box-shadow: 0 0 10px #bd00ff33; }
+
+        .primary-btn {
+            width: 100%; padding: 16px; background: #bd00ff; color: #fff; border: none;
+            border-radius: 14px; font-weight: 900; cursor: pointer; text-transform: uppercase;
+            margin-top: auto; letter-spacing: 1px; transition: 0.2s;
+        }
+        .primary-btn:active { transform: scale(0.98); }
+        .primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .setting-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 10px; background: #12121a; border-radius: 12px; }
+        .switch { position: relative; width: 40px; height: 20px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #222; transition: .4s; border-radius: 20px; }
+        .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px; background: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background: #bd00ff; }
+        input:checked + .slider:before { transform: translateX(20px); }
+
+        /* Site Injection Style */
+        .ex-injected-tile {
+            border: 2px solid #bd00ff !important;
+            box-shadow: 0 0 15px #bd00ff !important;
+            filter: brightness(1.2);
+            transition: 0.5s;
+        }
+    `;
+    document.head.appendChild(style);
+
+    // 2. DOM STRUCTURE
+    const shell = document.createElement('div');
+    shell.id = 'ex-shell';
+    let gridHTML = '';
+    for(let i=1; i<=25; i++) gridHTML += `<div class="tile" id="tile-${i}">${i}</div>`;
+
+    shell.innerHTML = `
+        <div class="ex-rail" id="drag-handle">
+            <div class="rail-icon active" id="btn-home" title="Home">📦</div>
+            <div class="rail-icon" id="btn-settings" title="Settings">⚙️</div>
+            <div class="rail-icon" id="btn-exit" style="margin-top:auto; color:#ff4b4b;" title="Close">⏻</div>
+        </div>
+        <div class="ex-content">
+            <div class="page active" id="page-home">
+                <div class="header-tag">Extraction Grid</div>
+                <div class="ex-grid">${gridHTML}</div>
+                <div class="input-box">
+                    <div class="label">Round Identifier</div>
+                    <input type="text" id="in-round" class="ex-field" placeholder="Paste Round ID...">
+                </div>
+                <div class="input-box">
+                    <div class="label">Client Seed</div>
+                    <input type="text" id="in-seed" class="ex-field" value="qNZ9pba8ruATnbNCYWKq">
+                </div>
+                <button class="primary-btn" id="btn-execute">Sync & Execute</button>
+            </div>
+            <div class="page" id="page-settings">
+                <div class="header-tag">System Configuration</div>
+                <div class="setting-row">
+                    <span style="font-size:12px; font-weight:600;">Unrigger / Anti-Trig</span>
+                    <label class="switch"><input type="checkbox" id="set-unrig" checked><span class="slider"></span></label>
+                </div>
+                <div class="setting-row">
+                    <span style="font-size:12px; font-weight:600;">Silent Seed Injection</span>
+                    <label class="switch"><input type="checkbox" id="set-silent"><span class="slider"></span></label>
+                </div>
+                <div class="input-box">
+                    <div class="label">Manual Seed Override</div>
+                    <input type="text" id="set-override-seed" class="ex-field" placeholder="Optional Custom Seed...">
+                </div>
+                <div style="font-size:10px; color:#555; padding:0 10px; line-height:1.5; margin-top: auto;">
+                    Engine Status: <span style="color:#00ff00;">V5_INTERNAL</span><br>
+                    Handshake: <span id="status-link" style="color:#bd00ff;">LOCAL_HOSTED</span>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(shell);
+
+    // 3. INTERNAL LOGIC
+    const executeBtn = document.getElementById('btn-execute');
+
+    executeBtn.onclick = async function() {
+        const roundId = document.getElementById('in-round').value.trim();
+        const mainSeed = document.getElementById('in-seed').value.trim();
+        const overrideSeed = document.getElementById('set-override-seed').value.trim();
+        const isUnrig = document.getElementById('set-unrig').checked;
+
+        const clientSeed = overrideSeed !== "" ? overrideSeed : mainSeed;
+
+        if (!roundId) {
+            executeBtn.innerText = "ROUND ID REQUIRED";
+            setTimeout(() => executeBtn.innerText = "Sync & Execute", 2000);
+            return;
+        }
+
+        executeBtn.disabled = true;
+        executeBtn.innerText = "CALCULATING...";
+
+        // Reset UI
+        document.querySelectorAll('.tile').forEach(t => t.classList.remove('highlight'));
+        // Clean up previous injected styles from site tiles
+        document.querySelectorAll('.ex-injected-tile').forEach(t => t.classList.remove('ex-injected-tile'));
+
+        try {
+            const tiles = await CryptoEngine.generateTiles(roundId, clientSeed, isUnrig);
+
+            // Highlight Menu Grid
+            tiles.forEach(tileNum => {
+                const tile = document.getElementById(`tile-${tileNum}`);
+                if (tile) tile.classList.add('highlight');
+            });
+
+            // Highlight Site Grid (Dynamic Selector)
+            const siteTiles = document.querySelectorAll('button[class*="mines-module-scss-module__gUfZ2G__minesGameItem"]');
+            if (siteTiles.length > 0) {
+                tiles.forEach(tileNum => {
+                    const index = tileNum - 1;
+                    if (siteTiles[index]) siteTiles[index].classList.add('ex-injected-tile');
+                });
+            }
+
+            executeBtn.innerText = "EXTRACTION SUCCESS";
+            document.getElementById('status-link').innerText = "CALC_COMPLETE";
+
+        } catch (error) {
+            console.error("Engine Error:", error);
+            executeBtn.innerText = "ENGINE ERROR";
+        }
+
+        setTimeout(() => {
+            executeBtn.disabled = false;
+            executeBtn.innerText = "Sync & Execute";
+        }, 2000);
+    };
+
+    // 4. NAVIGATION
+    const btnHome = document.getElementById('btn-home');
+    const btnSettings = document.getElementById('btn-settings');
+    const pageHome = document.getElementById('page-home');
+    const pageSettings = document.getElementById('page-settings');
+
+    btnHome.onclick = () => {
+        btnHome.classList.add('active');
+        btnSettings.classList.remove('active');
+        pageHome.classList.add('active');
+        pageSettings.classList.remove('active');
+    };
+
+    btnSettings.onclick = () => {
+        btnSettings.classList.add('active');
+        btnHome.classList.remove('active');
+        pageSettings.classList.add('active');
+        pageHome.classList.remove('active');
+    };
+
+    document.getElementById('btn-exit').onclick = () => {
+        shell.remove();
+        style.remove();
+    };
+
+    // 5. DRAGGABLE LOGIC
+    let isDragging = false, offset = [0,0];
+    const dragHandle = document.getElementById('drag-handle');
+
+    dragHandle.onmousedown = (e) => {
+        isDragging = true;
+        offset = [shell.offsetLeft - e.clientX, shell.offsetTop - e.clientY];
+    };
+
+    document.onmousemove = (e) => {
+        if (!isDragging) return;
+        shell.style.left = (e.clientX + offset[0]) + 'px';
+        shell.style.top = (e.clientY + offset[1]) + 'px';
+    };
+
+    document.onmouseup = () => isDragging = false;
+
+})();
